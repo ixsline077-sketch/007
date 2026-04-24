@@ -84,7 +84,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("У тебя нет доступа к этому боту.")
         return
 
-  await update.message.reply_text(
+  await update.message.reply_text()
+(
     "Привет! Я бот для учета расходов.\n\n"
     "Команды:\n"
     "/add — добавить расход\n"
