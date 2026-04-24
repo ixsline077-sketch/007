@@ -84,25 +84,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("У тебя нет доступа к этому боту.")
         return
 
-    await update.message.reply_text(
-        "Привет! Я бот для учета расходов.
-
-"
-        "Команды:
-"
-        "/add — добавить расход
-"
-        "/today — сумма за сегодня
-"
-        "/month — сумма за месяц
-"
-        "/last — последние 10 записей
-"
-        "/categories — суммы по категориям за месяц
-"
-        "/cancel — отмена"
-    )
-
+  await update.message.reply_text(
+    "Привет! Я бот для учета расходов.\n\n"
+    "Команды:\n"
+    "/add — добавить расход\n"
+    "/today — сумма за сегодня\n"
+    "/month — сумма за месяц\n"
+    "/last — последние 10 записей\n"
+    "/categories — суммы по категориям за месяц\n"
+    "/cancel — отмена"
+)
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
