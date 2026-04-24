@@ -1,196 +1,111 @@
 import logging
 import os
-from datetime import datetime, timedelta, time
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 
 import psycopg
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
     ConversationHandler,
+    MessageHandler,
     filters,
 )
 
 logging.basicConfig(
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
+CATEGORY_CHOICE, AMOUNT_INPUT, DESCRIPTION_INPUT = range(3)
+
+CATEGORIES = [
+    "Еда",
+    "Транспорт",
+    "Кофе",
+    "Развлечения",
+    "Покупки",
+    "Другое",
+]
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ALLOWED_USER_IDS_RAW = os.getenv("ALLOWED_USER_IDS", "")
-CHAT_ID = os.getenv("CHAT_ID")
-TZ_NAME = os.getenv("TZ", "Europe/Moscow")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ALLOWED_USER_IDS_RAW = os.getenv("ALLOWED_USER_IDS", "")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
-if not ALLOWED_USER_IDS_RAW:
-    raise RuntimeError("ALLOWED_USER_IDS is not set")
-if not CHAT_ID:
-    raise RuntimeError("CHAT_ID is not set")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set")
 
-ALLOWED_USER_IDS = {
-    int(x.strip()) for x in ALLOWED_USER_IDS_RAW.split(",") if x.strip()
-}
-CHAT_ID = int(CHAT_ID)
-TZ = ZoneInfo(TZ_NAME)
+def parse_allowed_user_ids() -> set[int]:
+    result = set()
+    for part in ALLOWED_USER_IDS_RAW.split(","):
+        part = part.strip()
+        if part.isdigit():
+            result.add(int(part))
+    return result
 
-CATEGORIES = ["Еда", "Самокат", "Фаст-фуд", "Матрешки"]
 
-CATEGORY_CHOICE, AMOUNT_INPUT = range(2)
+ALLOWED_USER_IDS = parse_allowed_user_ids()
 
-category_keyboard = ReplyKeyboardMarkup(
-    [
-        ["Еда", "Самокат"],
-        ["Фаст-фуд", "Матрешки"],
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True,
-)
+
+def is_allowed(user_id: int) -> bool:
+    if not ALLOWED_USER_IDS:
+        return True
+    return user_id in ALLOWED_USER_IDS
+
 
 def get_conn():
     return psycopg.connect(DATABASE_URL)
 
+
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS expenses (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
-                    username TEXT,
-                    amount NUMERIC(12, 2) NOT NULL,
                     category TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    amount NUMERIC(12, 2) NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
                 )
-            """)
-        conn.commit()
-
-def is_allowed(user_id: int) -> bool:
-    return user_id in ALLOWED_USER_IDS
-
-def now_msk() -> datetime:
-    return datetime.now(TZ)
-
-def format_money(value: float) -> str:
-    return f"{value:.0f} ₽" if value == int(value) else f"{value:.2f} ₽"
-
-def add_expense(user_id: int, username: str, amount: float, category: str):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
                 """
-                INSERT INTO expenses (user_id, username, amount, category, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (user_id, username, amount, category, now_msk()),
             )
         conn.commit()
 
-def sum_between(start_dt: datetime, end_dt: datetime):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(amount), 0)
-                FROM expenses
-                WHERE created_at >= %s AND created_at < %s
-                """,
-                (start_dt, end_dt),
-            )
-            row = cur.fetchone()
-            return float(row[0] or 0)
-
-def category_stats_between(start_dt: datetime, end_dt: datetime):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT category, COALESCE(SUM(amount), 0) AS total
-                FROM expenses
-                WHERE created_at >= %s AND created_at < %s
-                GROUP BY category
-                ORDER BY total DESC
-                """,
-                (start_dt, end_dt),
-            )
-            rows = cur.fetchall()
-            return rows
-
-def user_stats_between(start_dt: datetime, end_dt: datetime):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COALESCE(username, user_id::text) AS name, COALESCE(SUM(amount), 0) AS total
-                FROM expenses
-                WHERE created_at >= %s AND created_at < %s
-                GROUP BY user_id, username
-                ORDER BY total DESC
-                """,
-                (start_dt, end_dt),
-            )
-            rows = cur.fetchall()
-            return rows
-
-def last_expenses(limit: int = 10):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, user_id, username, amount, category, created_at
-                FROM expenses
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            rows = cur.fetchall()
-            return rows
-
-def day_bounds(target: datetime):
-    start = datetime.combine(target.date(), time.min, tzinfo=TZ)
-    end = start + timedelta(days=1)
-    return start, end
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_allowed(user.id):
-        await update.message.reply_text("У тебя нет доступа к этому боту.")
+    if not user or not update.message or not is_allowed(user.id):
+        if update.message:
+            await update.message.reply_text("У тебя нет доступа к этому боту.")
         return
 
-    text = (
-        "Бот учета расходов готов.\n\n"
-        "Добавить расход: /add\n\n"
+    await update.message.reply_text(
+        "Привет! Я бот для учета расходов.\n\n"
         "Команды:\n"
-        "/today — расходы за сегодня\n"
-        "/week — расходы за 7 дней\n"
-        "/month — расходы за месяц\n"
-        "/last — последние записи\n"
-        "/help — помощь"
+        "/add — добавить расход\n"
+        "/today — сумма за сегодня\n"
+        "/month — сумма за месяц\n"
+        "/last — последние 10 записей\n"
+        "/categories — суммы по категориям за месяц\n"
+        "/cancel — отмена"
     )
-    await update.message.reply_text(text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_allowed(user.id):
-        await update.message.reply_text("У тебя нет доступа.")
+    if not user or not update.message or not is_allowed(user.id):
         return ConversationHandler.END
 
+    keyboard = [[c] for c in CATEGORIES]
     await update.message.reply_text(
         "Выбери категорию:",
-        reply_markup=category_keyboard
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True),
     )
     return CATEGORY_CHOICE
+
 
 async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -205,15 +120,213 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_expense_category"] = category
     await update.message.reply_text(
         f"Категория: {category}\nТеперь введи сумму, например: 350",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardRemove(),
     )
     return AMOUNT_INPUT
+
 
 async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not update.message or not is_allowed(user.id):
         return ConversationHandler.END
 
-    text = update.message.text.strip().replace(",", ".").replace("₽", "")
+    text = update.message.text.strip().replace(",", ".").replace("р", "").replace("₽", "").strip()
+
     try:
-        amount 
+        amount = float(text)
+    except ValueError:
+        await update.message.reply_text("Введите сумму числом, например: 350")
+        return AMOUNT_INPUT
+
+    if amount <= 0:
+        await update.message.reply_text("Сумма должна быть больше нуля.")
+        return AMOUNT_INPUT
+
+    context.user_data["new_expense_amount"] = amount
+    await update.message.reply_text("Теперь введи описание, например: кофе в Starbucks")
+    return DESCRIPTION_INPUT
+
+
+async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not update.message or not is_allowed(user.id):
+        return ConversationHandler.END
+
+    description = update.message.text.strip()
+    category = context.user_data.get("new_expense_category")
+    amount = context.user_data.get("new_expense_amount")
+
+    if not category or amount is None:
+        await update.message.reply_text("Сессия сбилась. Нажми /add заново.")
+        return ConversationHandler.END
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO expenses (user_id, category, amount, description)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (user.id, category, amount, description),
+            )
+        conn.commit()
+
+    await update.message.reply_text(
+        f"Записал расход:\n"
+        f"Категория: {category}\n"
+        f"Сумма: {amount:.2f}\n"
+        f"Описание: {description}"
+    )
+
+    context.user_data.pop("new_expense_category", None)
+    context.user_data.pop("new_expense_amount", None)
+
+    return ConversationHandler.END
+
+
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not update.message or not is_allowed(user.id):
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM expenses
+                WHERE user_id = %s
+                  AND created_at::date = CURRENT_DATE
+                """,
+                (user.id,),
+            )
+            total = cur.fetchone()[0]
+
+    await update.message.reply_text(f"За сегодня: {float(total):.2f}")
+
+
+async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not update.message or not is_allowed(user.id):
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM expenses
+                WHERE user_id = %s
+                  AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
+                """,
+                (user.id,),
+            )
+            total = cur.fetchone()[0]
+
+    await update.message.reply_text(f"За этот месяц: {float(total):.2f}")
+
+
+async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not update.message or not is_allowed(user.id):
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT category, amount, description, created_at
+                FROM expenses
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 10
+                """,
+                (user.id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("Пока нет расходов.")
+        return
+
+    lines = ["Последние расходы:"]
+    for category, amount, description, created_at in rows:
+        dt = created_at.strftime("%d.%m %H:%M")
+        lines.append(f"{dt} | {category} | {float(amount):.2f} | {description}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not update.message or not is_allowed(user.id):
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT category, COALESCE(SUM(amount), 0) AS total
+                FROM expenses
+                WHERE user_id = %s
+                  AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
+                GROUP BY category
+                ORDER BY total DESC
+                """,
+                (user.id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("За этот месяц расходов по категориям пока нет.")
+        return
+
+    lines = ["Категории за месяц:"]
+    for category, total in rows:
+        lines.append(f"{category}: {float(total):.2f}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        await update.message.reply_text("Ок, отменил.", reply_markup=ReplyKeyboardRemove())
+    context.user_data.pop("new_expense_category", None)
+    context.user_data.pop("new_expense_amount", None)
+    return ConversationHandler.END
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL не задан")
+
+    init_db()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("add", add_start)],
+        states={
+            CATEGORY_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_category)],
+            AMOUNT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_amount)],
+            DESCRIPTION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_description)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("month", month))
+    app.add_handler(CommandHandler("last", last_expenses))
+    app.add_handler(CommandHandler("categories", categories))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(conv_handler)
+
+    logger.info("Bot started")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
