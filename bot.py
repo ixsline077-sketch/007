@@ -31,7 +31,7 @@ CATEGORIES = [
 ]
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ALLOWED_USER_IDS_RAW = os.getenv("ALLOWED_USER_IDS", "")
 
 
@@ -54,6 +54,8 @@ def is_allowed(user_id: int) -> bool:
 
 
 def get_conn():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL не задан")
     return psycopg.connect(DATABASE_URL)
 
 
@@ -83,13 +85,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Привет! Я бот для учета расходов.\n\n"
-        "Команды:\n"
-        "/add — добавить расход\n"
-        "/today — сумма за сегодня\n"
-        "/month — сумма за месяц\n"
-        "/last — последние 10 записей\n"
-        "/categories — суммы по категориям за месяц\n"
+        "Привет! Я бот для учета расходов.
+
+"
+        "Команды:
+"
+        "/add — добавить расход
+"
+        "/today — сумма за сегодня
+"
+        "/month — сумма за месяц
+"
+        "/last — последние 10 записей
+"
+        "/categories — суммы по категориям за месяц
+"
         "/cancel — отмена"
     )
 
@@ -119,7 +129,8 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["new_expense_category"] = category
     await update.message.reply_text(
-        f"Категория: {category}\nТеперь введи сумму, например: 350",
+        f"Категория: {category}
+Теперь введи сумму, например: 350",
         reply_markup=ReplyKeyboardRemove(),
     )
     return AMOUNT_INPUT
@@ -160,21 +171,29 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сессия сбилась. Нажми /add заново.")
         return ConversationHandler.END
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO expenses (user_id, category, amount, description)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (user.id, category, amount, description),
-            )
-        conn.commit()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO expenses (user_id, category, amount, description)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user.id, category, amount, description),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to insert expense")
+        await update.message.reply_text("Не смог сохранить расход. Проверь базу и попробуй еще раз.")
+        return ConversationHandler.END
 
     await update.message.reply_text(
-        f"Записал расход:\n"
-        f"Категория: {category}\n"
-        f"Сумма: {amount:.2f}\n"
+        f"Записал расход:
+"
+        f"Категория: {category}
+"
+        f"Сумма: {amount:.2f}
+"
         f"Описание: {description}"
     )
 
@@ -189,18 +208,23 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not update.message or not is_allowed(user.id):
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(amount), 0)
-                FROM expenses
-                WHERE user_id = %s
-                  AND created_at::date = CURRENT_DATE
-                """,
-                (user.id,),
-            )
-            total = cur.fetchone()[0]
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM expenses
+                    WHERE user_id = %s
+                      AND created_at::date = CURRENT_DATE
+                    """,
+                    (user.id,),
+                )
+                total = cur.fetchone()[0]
+    except Exception:
+        logger.exception("Failed to read today expenses")
+        await update.message.reply_text("Не смог прочитать данные из базы.")
+        return
 
     await update.message.reply_text(f"За сегодня: {float(total):.2f}")
 
@@ -210,18 +234,23 @@ async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not update.message or not is_allowed(user.id):
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(amount), 0)
-                FROM expenses
-                WHERE user_id = %s
-                  AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
-                """,
-                (user.id,),
-            )
-            total = cur.fetchone()[0]
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM expenses
+                    WHERE user_id = %s
+                      AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
+                    """,
+                    (user.id,),
+                )
+                total = cur.fetchone()[0]
+    except Exception:
+        logger.exception("Failed to read month expenses")
+        await update.message.reply_text("Не смог прочитать данные из базы.")
+        return
 
     await update.message.reply_text(f"За этот месяц: {float(total):.2f}")
 
@@ -231,19 +260,24 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not update.message or not is_allowed(user.id):
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT category, amount, description, created_at
-                FROM expenses
-                WHERE user_id = %s
-                ORDER BY created_at DESC
-                LIMIT 10
-                """,
-                (user.id,),
-            )
-            rows = cur.fetchall()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT category, amount, description, created_at
+                    FROM expenses
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                    """,
+                    (user.id,),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        logger.exception("Failed to read last expenses")
+        await update.message.reply_text("Не смог прочитать данные из базы.")
+        return
 
     if not rows:
         await update.message.reply_text("Пока нет расходов.")
@@ -252,9 +286,11 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["Последние расходы:"]
     for category, amount, description, created_at in rows:
         dt = created_at.strftime("%d.%m %H:%M")
-        lines.append(f"{dt} | {category} | {float(amount):.2f} | {description}")
+        desc = description or "Без описания"
+        lines.append(f"{dt} | {category} | {float(amount):.2f} | {desc}")
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("
+".join(lines))
 
 
 async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -262,20 +298,25 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not update.message or not is_allowed(user.id):
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT category, COALESCE(SUM(amount), 0) AS total
-                FROM expenses
-                WHERE user_id = %s
-                  AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
-                GROUP BY category
-                ORDER BY total DESC
-                """,
-                (user.id,),
-            )
-            rows = cur.fetchall()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT category, COALESCE(SUM(amount), 0) AS total
+                    FROM expenses
+                    WHERE user_id = %s
+                      AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
+                    GROUP BY category
+                    ORDER BY total DESC
+                    """,
+                    (user.id,),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        logger.exception("Failed to read category summary")
+        await update.message.reply_text("Не смог прочитать данные из базы.")
+        return
 
     if not rows:
         await update.message.reply_text("За этот месяц расходов по категориям пока нет.")
@@ -285,7 +326,8 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for category, total in rows:
         lines.append(f"{category}: {float(total):.2f}")
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("
+".join(lines))
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,3 +372,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
