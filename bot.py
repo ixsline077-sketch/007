@@ -84,21 +84,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Привет! Я бот для учета расходов.
-
-"
-        "Команды:
-"
-        "/add — добавить расход
-"
-        "/today — сумма за сегодня
-"
-        "/month — сумма за месяц
-"
-        "/last — последние 10 записей
-"
-        "/categories — суммы по категориям за месяц
-"
+        "Привет! Я бот для учета расходов.\n\n"
+        "Команды:\n"
+        "/add — добавить расход\n"
+        "/today — сумма за сегодня\n"
+        "/month — сумма за месяц\n"
+        "/last — последние 10 записей\n"
+        "/categories — суммы по категориям за месяц\n"
         "/cancel — отмена"
     )
 
@@ -128,8 +120,7 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["new_expense_category"] = category
     await update.message.reply_text(
-        f"Категория: {category}
-"
+        f"Категория: {category}\n"
         "Теперь введи сумму, например: 350",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -188,12 +179,9 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await update.message.reply_text(
-        f"Записал расход:
-"
-        f"Категория: {category}
-"
-        f"Сумма: {amount:.2f}
-"
+        f"Записал расход:\n"
+        f"Категория: {category}\n"
+        f"Сумма: {amount:.2f}\n"
         f"Описание: {description}"
     )
 
@@ -289,8 +277,7 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         desc = description or "Без описания"
         lines.append(f"{dt} | {category} | {float(amount):.2f} | {desc}")
 
-    await update.message.reply_text("
-".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
 
 async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -326,8 +313,7 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for category, total in rows:
         lines.append(f"{category}: {float(total):.2f}")
 
-    await update.message.reply_text("
-".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
