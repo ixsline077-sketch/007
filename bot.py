@@ -84,16 +84,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-    "Привет! Я бот для учета расходов.\n\n"
-    "Команды:\n"
-    "/add — добавить расход\n"
-    "/today — сумма за сегодня\n"
-    "/month — сумма за месяц\n"
-    "/last — последние 10 записей\n"
-    "/categories — суммы по категориям за месяц\n"
-    "/cancel — отмена"
-)
+        "Привет! Я бот для учета расходов.
 
+"
+        "Команды:
+"
+        "/add — добавить расход
+"
+        "/today — сумма за сегодня
+"
+        "/month — сумма за месяц
+"
+        "/last — последние 10 записей
+"
+        "/categories — суммы по категориям за месяц
+"
+        "/cancel — отмена"
+    )
 
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,11 +128,11 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["new_expense_category"] = category
     await update.message.reply_text(
-    f"Категория: {category}\n"
-    "Теперь введи сумму, например: 350",
-    reply_markup=ReplyKeyboardRemove(),
-)
-
+        f"Категория: {category}
+"
+        "Теперь введи сумму, например: 350",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return AMOUNT_INPUT
 
 
@@ -365,5 +372,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
