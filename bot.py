@@ -121,10 +121,11 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["new_expense_category"] = category
     await update.message.reply_text(
-        f"Категория: {category}
-Теперь введи сумму, например: 350",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    f"Категория: {category}\n"
+    "Теперь введи сумму, например: 350",
+    reply_markup=ReplyKeyboardRemove(),
+)
+
     return AMOUNT_INPUT
 
 
