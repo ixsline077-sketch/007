@@ -181,7 +181,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/last — последние 10 записей\n"
         "/categories — суммы по категориям за месяц\n"
         "/delete — удалить последний расход\n"
-        "/delete 123 — удалить расход по id\n"
+        "/deleted 123 — удалить расход по id\n"
         "/cancel — отмена\n\n"
         "Если ошибся в сумме, просто отредактируй сообщение с суммой."
     )
