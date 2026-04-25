@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CATEGORY_CHOICE, AMOUNT_INPUT, DESCRIPTION_INPUT = range(3)
+CATEGORY_CHOICE, AMOUNT_INPUT = range(2)
 
 CATEGORIES = [
     "Еда",
@@ -247,34 +247,8 @@ async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите сумму числом, например: 350 или 199.90")
         return AMOUNT_INPUT
 
-    context.user_data["new_expense_amount"] = amount
-    context.user_data["new_expense_source_message_id"] = update.message.message_id
-    context.user_data["new_expense_chat_id"] = update.message.chat_id
-
-    await update.message.reply_text(
-        "Теперь введи описание, например: кофе на районе\n"
-        "Если передумал — нажми /cancel\n"
-        "Если ошибся в сумме — потом просто отредактируй сообщение с числом."
-    )
-    return DESCRIPTION_INPUT
-
-
-async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user or not update.message:
-        return ConversationHandler.END
-
-    if not is_allowed(user.id):
-        await deny_access(update)
-        return ConversationHandler.END
-
-    description = update.message.text.strip()
     category = context.user_data.get("new_expense_category")
-    amount = context.user_data.get("new_expense_amount")
-    source_message_id = context.user_data.get("new_expense_source_message_id")
-    chat_id = context.user_data.get("new_expense_chat_id")
-
-    if not category or amount is None or source_message_id is None or chat_id is None:
+    if not category:
         clear_expense_draft(context)
         await update.message.reply_text("Сессия сбилась. Нажми /add заново.")
         return ConversationHandler.END
@@ -291,11 +265,11 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     """,
                     (
                         user.id,
-                        chat_id,
-                        source_message_id,
+                        update.message.chat_id,
+                        update.message.message_id,
                         category,
                         amount,
-                        description or None,
+                        None,
                     ),
                 )
             conn.commit()
@@ -311,8 +285,7 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Записал расход:\n"
         f"Категория: {category}\n"
-        f"Сумма: {amount:.2f}\n"
-        f"Описание: {description or 'Без описания'}"
+        f"Сумма: {amount:.2f}"
     )
 
     return ConversationHandler.END
@@ -473,9 +446,8 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["Последние расходы:"]
     for row in rows:
         dt = row["created_at"].strftime("%d.%m %H:%M")
-        desc = row["description"] or "Без описания"
         lines.append(
-            f"#{row['id']} | {dt} | {row['category']} | {Decimal(row['amount']):.2f} | {desc}"
+            f"#{row['id']} | {dt} | {row['category']} | {Decimal(row['amount']):.2f}"
         )
 
     await update.message.reply_text("\n".join(lines))
@@ -567,10 +539,9 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не смог удалить расход из базы.")
         return
 
-    desc = row["description"] or "Без описания"
     await update.message.reply_text(
         f"Удалил расход:\n"
-        f"#{row['id']} | {row['category']} | {Decimal(row['amount']):.2f} | {desc}"
+        f"#{row['id']} | {row['category']} | {Decimal(row['amount']):.2f}"
     )
 
 
@@ -594,7 +565,6 @@ def main():
         states={
             CATEGORY_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_category)],
             AMOUNT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_amount)],
-            DESCRIPTION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_description)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
