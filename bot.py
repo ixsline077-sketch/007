@@ -43,7 +43,7 @@ BOT_TOKEN = get_required_env("BOT_TOKEN")
 ALLOWED_USER_IDS_RAW = os.getenv("ALLOWED_USER_IDS", "").strip()
 
 
-def normalize_database_url(raw_url: str) -> str:
+def normalize_database_url(raw_url: str | None) -> str:
     url = (raw_url or "").strip()
     if not url:
         raise RuntimeError("DATABASE_URL не задан")
@@ -51,17 +51,12 @@ def normalize_database_url(raw_url: str) -> str:
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
 
-    if "postgres.railway.internal" in url:
-        raise RuntimeError(
-            "DATABASE_URL указывает на postgres.railway.internal. "
-            "Скорее всего, в Railway задан устаревший или неверный host. "
-            "Возьми свежий PostgreSQL connection string из переменных Railway."
-        )
-
     return url
 
 
-DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL"))
+DATABASE_URL = normalize_database_url(
+    os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
+)
 
 
 def parse_allowed_user_ids(raw_value: str) -> set[int]:
@@ -83,16 +78,12 @@ def is_allowed(user_id: int) -> bool:
 
 
 def get_conn():
-    try:
-        return psycopg.connect(
-            DATABASE_URL,
-            autocommit=False,
-            connect_timeout=10,
-            row_factory=dict_row,
-        )
-    except psycopg.OperationalError as e:
-        logger.exception("Database connection failed")
-        raise RuntimeError(f"Не удалось подключиться к БД: {e}") from e
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=False,
+        connect_timeout=10,
+        row_factory=dict_row,
+    )
 
 
 def init_db():
@@ -237,7 +228,7 @@ async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return AMOUNT_INPUT
 
     context.user_data["new_expense_amount"] = amount
-    await update.message.reply_text("Теперь введи описание, например: кофе в Starbucks")
+    await update.message.reply_text("Теперь введи описание, например: кофе на районе")
     return DESCRIPTION_INPUT
 
 
@@ -273,7 +264,7 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception("Failed to insert expense")
         await update.message.reply_text(
-            "Не смог сохранить расход. Проверь DATABASE_URL в Railway и доступность базы."
+            "Не смог сохранить расход. Проверь подключение к базе и попробуй еще раз."
         )
         return ConversationHandler.END
     finally:
