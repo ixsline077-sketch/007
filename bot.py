@@ -155,7 +155,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Привет! Я бот для учета расходов.\n\n"
+        "Привет! Я бот для записи расходов.\n\n"
         "Команды:\n"
         "/add — добавить расход\n"
         "/today — сумма за сегодня\n"
