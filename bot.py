@@ -180,6 +180,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/month — сумма за месяц\n"
         "/last — последние 10 записей\n"
         "/categories — суммы по категориям за месяц\n"
+        "/delete — удалить последний расход\n"
+        "/delete 123 — удалить расход по id\n"
         "/cancel — отмена\n\n"
         "Если ошибся в сумме, просто отредактируй сообщение с суммой."
     )
@@ -252,6 +254,7 @@ async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Теперь введи описание, например: кофе на районе\n"
+        "Если передумал — нажми /cancel\n"
         "Если ошибся в сумме — потом просто отредактируй сообщение с числом."
     )
     return DESCRIPTION_INPUT
@@ -450,7 +453,7 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT category, amount, description, created_at
+                    SELECT id, category, amount, description, created_at
                     FROM expenses
                     WHERE user_id = %s
                     ORDER BY created_at DESC
@@ -472,7 +475,9 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
         dt = row["created_at"].strftime("%d.%m %H:%M")
         desc = row["description"] or "Без описания"
-        lines.append(f"{dt} | {row['category']} | {Decimal(row['amount']):.2f} | {desc}")
+        lines.append(
+            f"#{row['id']} | {dt} | {row['category']} | {Decimal(row['amount']):.2f} | {desc}"
+        )
 
     await update.message.reply_text("\n".join(lines))
 
@@ -517,10 +522,82 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not update.message:
+        return
+
+    if not is_allowed(user.id):
+        await deny_access(update)
+        return
+
+    expense_id = None
+
+    if context.args:
+        arg = context.args[0].strip()
+        if not arg.isdigit():
+            await update.message.reply_text("Используй: /delete или /delete 123")
+            return
+        expense_id = int(arg)
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                if expense_id is None:
+                    cur.execute(
+                        """
+                        SELECT id, category, amount, description, created_at
+                        FROM expenses
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (user.id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, category, amount, description, created_at
+                        FROM expenses
+                        WHERE user_id = %s AND id = %s
+                        LIMIT 1
+                        """,
+                        (user.id, expense_id),
+                    )
+
+                row = cur.fetchone()
+
+                if not row:
+                    await update.message.reply_text("Расход не найден.")
+                    return
+
+                cur.execute(
+                    """
+                    DELETE FROM expenses
+                    WHERE user_id = %s AND id = %s
+                    """,
+                    (user.id, row["id"]),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to delete expense")
+        await update.message.reply_text("Не смог удалить расход из базы.")
+        return
+
+    desc = row["description"] or "Без описания"
+    await update.message.reply_text(
+        f"Удалил расход:\n"
+        f"#{row['id']} | {row['category']} | {Decimal(row['amount']):.2f} | {desc}"
+    )
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_expense_draft(context)
     if update.message:
-        await update.message.reply_text("Ок, отменил.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Ок, отменил добавление расхода.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
     return ConversationHandler.END
 
 
@@ -537,6 +614,7 @@ def main():
             DESCRIPTION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_description)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -544,6 +622,7 @@ def main():
     app.add_handler(CommandHandler("month", month))
     app.add_handler(CommandHandler("last", last_expenses))
     app.add_handler(CommandHandler("categories", categories))
+    app.add_handler(CommandHandler("delete", delete_expense))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(conv_handler)
     app.add_handler(
