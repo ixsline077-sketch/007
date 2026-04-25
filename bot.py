@@ -94,6 +94,8 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS expenses (
                     id BIGSERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
+                    chat_id BIGINT NOT NULL,
+                    source_message_id BIGINT,
                     category TEXT NOT NULL,
                     amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
                     description TEXT,
@@ -109,8 +111,8 @@ def init_db():
             )
             cur.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_expenses_user_category_created_at
-                ON expenses (user_id, category, created_at DESC)
+                CREATE INDEX IF NOT EXISTS idx_expenses_user_message
+                ON expenses (user_id, chat_id, source_message_id)
                 """
             )
         conn.commit()
@@ -119,6 +121,8 @@ def init_db():
 def clear_expense_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("new_expense_category", None)
     context.user_data.pop("new_expense_amount", None)
+    context.user_data.pop("new_expense_source_message_id", None)
+    context.user_data.pop("new_expense_chat_id", None)
 
 
 def parse_amount(text: str) -> Decimal:
@@ -143,6 +147,8 @@ def parse_amount(text: str) -> Decimal:
 async def deny_access(update: Update) -> None:
     if update.message:
         await update.message.reply_text("У тебя нет доступа к этому боту.")
+    elif update.edited_message:
+        await update.edited_message.reply_text("У тебя нет доступа к этому боту.")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,14 +161,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Привет! Я бот для учёта расходов.\n\n"
+        "Привет! Я бот для записи расходов.\n\n"
         "Команды:\n"
         "/add — добавить расход\n"
         "/today — сумма за сегодня\n"
         "/month — сумма за месяц\n"
         "/last — последние 10 записей\n"
         "/categories — суммы по категориям за месяц\n"
-        "/cancel — отмена"
+        "/cancel — отмена\n\n"
+        "Если ошибся в сумме, просто отредактируй сообщение с суммой."
     )
 
 
@@ -228,7 +235,13 @@ async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return AMOUNT_INPUT
 
     context.user_data["new_expense_amount"] = amount
-    await update.message.reply_text("Теперь введи описание, например: кофе на районе")
+    context.user_data["new_expense_source_message_id"] = update.message.message_id
+    context.user_data["new_expense_chat_id"] = update.message.chat_id
+
+    await update.message.reply_text(
+        "Теперь введи описание, например: кофе на районе\n"
+        "Если ошибся в сумме — потом просто отредактируй сообщение с числом."
+    )
     return DESCRIPTION_INPUT
 
 
@@ -244,8 +257,10 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     description = update.message.text.strip()
     category = context.user_data.get("new_expense_category")
     amount = context.user_data.get("new_expense_amount")
+    source_message_id = context.user_data.get("new_expense_source_message_id")
+    chat_id = context.user_data.get("new_expense_chat_id")
 
-    if not category or amount is None:
+    if not category or amount is None or source_message_id is None or chat_id is None:
         clear_expense_draft(context)
         await update.message.reply_text("Сессия сбилась. Нажми /add заново.")
         return ConversationHandler.END
@@ -255,10 +270,19 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO expenses (user_id, category, amount, description)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO expenses (
+                        user_id, chat_id, source_message_id, category, amount, description
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     """,
-                    (user.id, category, amount, description or None),
+                    (
+                        user.id,
+                        chat_id,
+                        source_message_id,
+                        category,
+                        amount,
+                        description or None,
+                    ),
                 )
             conn.commit()
     except Exception:
@@ -278,6 +302,60 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     return ConversationHandler.END
+
+
+async def handle_edited_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.edited_message
+    if not message or not message.from_user or not message.text:
+        return
+
+    user_id = message.from_user.id
+    if not is_allowed(user_id):
+        return
+
+    try:
+        new_amount = parse_amount(message.text)
+    except (InvalidOperation, ValueError):
+        return
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, amount
+                    FROM expenses
+                    WHERE user_id = %s
+                      AND chat_id = %s
+                      AND source_message_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (user_id, message.chat_id, message.message_id),
+                )
+                row = cur.fetchone()
+
+                if not row:
+                    return
+
+                old_amount = row["amount"]
+
+                cur.execute(
+                    """
+                    UPDATE expenses
+                    SET amount = %s
+                    WHERE id = %s
+                    """,
+                    (new_amount, row["id"]),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to update edited expense amount")
+        return
+
+    await message.reply_text(
+        f"Сумму обновил: {Decimal(old_amount):.2f} -> {new_amount:.2f}"
+    )
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,6 +530,7 @@ def main():
     app.add_handler(CommandHandler("categories", categories))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(conv_handler)
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_amount))
 
     logger.info("Bot started")
     app.run_polling(drop_pending_updates=True)
