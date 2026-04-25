@@ -1,7 +1,9 @@
 import logging
 import os
+from decimal import Decimal, InvalidOperation
 
 import psycopg
+from psycopg.rows import dict_row
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
@@ -29,21 +31,49 @@ CATEGORIES = [
     "Другое",
 ]
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
-ALLOWED_USER_IDS_RAW = os.getenv("ALLOWED_USER_IDS", "")
+
+def get_required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} не задан")
+    return value
 
 
-def parse_allowed_user_ids() -> set[int]:
+BOT_TOKEN = get_required_env("BOT_TOKEN")
+ALLOWED_USER_IDS_RAW = os.getenv("ALLOWED_USER_IDS", "").strip()
+
+
+def normalize_database_url(raw_url: str) -> str:
+    url = (raw_url or "").strip()
+    if not url:
+        raise RuntimeError("DATABASE_URL не задан")
+
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+
+    if "postgres.railway.internal" in url:
+        raise RuntimeError(
+            "DATABASE_URL указывает на postgres.railway.internal. "
+            "Скорее всего, в Railway задан устаревший или неверный host. "
+            "Возьми свежий PostgreSQL connection string из переменных Railway."
+        )
+
+    return url
+
+
+DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL"))
+
+
+def parse_allowed_user_ids(raw_value: str) -> set[int]:
     result = set()
-    for part in ALLOWED_USER_IDS_RAW.split(","):
+    for part in raw_value.split(","):
         part = part.strip()
         if part.isdigit():
             result.add(int(part))
     return result
 
 
-ALLOWED_USER_IDS = parse_allowed_user_ids()
+ALLOWED_USER_IDS = parse_allowed_user_ids(ALLOWED_USER_IDS_RAW)
 
 
 def is_allowed(user_id: int) -> bool:
@@ -53,9 +83,16 @@ def is_allowed(user_id: int) -> bool:
 
 
 def get_conn():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL не задан")
-    return psycopg.connect(DATABASE_URL)
+    try:
+        return psycopg.connect(
+            DATABASE_URL,
+            autocommit=False,
+            connect_timeout=10,
+            row_factory=dict_row,
+        )
+    except psycopg.OperationalError as e:
+        logger.exception("Database connection failed")
+        raise RuntimeError(f"Не удалось подключиться к БД: {e}") from e
 
 
 def init_db():
@@ -64,23 +101,66 @@ def init_db():
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS expenses (
-                    id SERIAL PRIMARY KEY,
+                    id BIGSERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
                     category TEXT NOT NULL,
-                    amount NUMERIC(12, 2) NOT NULL,
+                    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
                     description TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT NOW()
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_expenses_user_created_at
+                ON expenses (user_id, created_at DESC)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_expenses_user_category_created_at
+                ON expenses (user_id, category, created_at DESC)
+                """
+            )
         conn.commit()
+
+
+def clear_expense_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("new_expense_category", None)
+    context.user_data.pop("new_expense_amount", None)
+
+
+def parse_amount(text: str) -> Decimal:
+    normalized = (
+        text.strip()
+        .replace("₽", "")
+        .replace("р.", "")
+        .replace("р", "")
+        .replace(" ", "")
+        .replace(",", ".")
+    )
+
+    amount = Decimal(normalized)
+    amount = amount.quantize(Decimal("0.01"))
+
+    if amount <= 0:
+        raise InvalidOperation("Amount must be positive")
+
+    return amount
+
+
+async def deny_access(update: Update) -> None:
+    if update.message:
+        await update.message.reply_text("У тебя нет доступа к этому боту.")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
-        if update.message:
-            await update.message.reply_text("У тебя нет доступа к этому боту.")
+    if not user or not update.message:
+        return
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return
 
     await update.message.reply_text(
@@ -97,20 +177,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
         return ConversationHandler.END
+
+    if not is_allowed(user.id):
+        await deny_access(update)
+        return ConversationHandler.END
+
+    clear_expense_draft(context)
 
     keyboard = [[c] for c in CATEGORIES]
     await update.message.reply_text(
         "Выбери категорию:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
     )
     return CATEGORY_CHOICE
 
 
 async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
+        return ConversationHandler.END
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return ConversationHandler.END
 
     category = update.message.text.strip()
@@ -121,7 +215,7 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_expense_category"] = category
     await update.message.reply_text(
         f"Категория: {category}\n"
-        "Теперь введи сумму, например: 350",
+        "Теперь введи сумму, например: 350 или 199.90",
         reply_markup=ReplyKeyboardRemove(),
     )
     return AMOUNT_INPUT
@@ -129,19 +223,17 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
         return ConversationHandler.END
 
-    text = update.message.text.strip().replace(",", ".").replace("р", "").replace("₽", "").strip()
+    if not is_allowed(user.id):
+        await deny_access(update)
+        return ConversationHandler.END
 
     try:
-        amount = float(text)
-    except ValueError:
-        await update.message.reply_text("Введите сумму числом, например: 350")
-        return AMOUNT_INPUT
-
-    if amount <= 0:
-        await update.message.reply_text("Сумма должна быть больше нуля.")
+        amount = parse_amount(update.message.text)
+    except (InvalidOperation, ValueError):
+        await update.message.reply_text("Введите сумму числом, например: 350 или 199.90")
         return AMOUNT_INPUT
 
     context.user_data["new_expense_amount"] = amount
@@ -151,7 +243,11 @@ async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
+        return ConversationHandler.END
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return ConversationHandler.END
 
     description = update.message.text.strip()
@@ -159,6 +255,7 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     amount = context.user_data.get("new_expense_amount")
 
     if not category or amount is None:
+        clear_expense_draft(context)
         await update.message.reply_text("Сессия сбилась. Нажми /add заново.")
         return ConversationHandler.END
 
@@ -170,30 +267,35 @@ async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     INSERT INTO expenses (user_id, category, amount, description)
                     VALUES (%s, %s, %s, %s)
                     """,
-                    (user.id, category, amount, description),
+                    (user.id, category, amount, description or None),
                 )
             conn.commit()
     except Exception:
         logger.exception("Failed to insert expense")
-        await update.message.reply_text("Не смог сохранить расход. Проверь базу и попробуй еще раз.")
+        await update.message.reply_text(
+            "Не смог сохранить расход. Проверь DATABASE_URL в Railway и доступность базы."
+        )
         return ConversationHandler.END
+    finally:
+        clear_expense_draft(context)
 
     await update.message.reply_text(
         f"Записал расход:\n"
         f"Категория: {category}\n"
         f"Сумма: {amount:.2f}\n"
-        f"Описание: {description}"
+        f"Описание: {description or 'Без описания'}"
     )
-
-    context.user_data.pop("new_expense_category", None)
-    context.user_data.pop("new_expense_amount", None)
 
     return ConversationHandler.END
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
+        return
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return
 
     try:
@@ -201,25 +303,30 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COALESCE(SUM(amount), 0)
+                    SELECT COALESCE(SUM(amount), 0) AS total
                     FROM expenses
                     WHERE user_id = %s
                       AND created_at::date = CURRENT_DATE
                     """,
                     (user.id,),
                 )
-                total = cur.fetchone()[0]
+                row = cur.fetchone()
+                total = row["total"]
     except Exception:
         logger.exception("Failed to read today expenses")
         await update.message.reply_text("Не смог прочитать данные из базы.")
         return
 
-    await update.message.reply_text(f"За сегодня: {float(total):.2f}")
+    await update.message.reply_text(f"За сегодня: {Decimal(total):.2f}")
 
 
 async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
+        return
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return
 
     try:
@@ -227,25 +334,30 @@ async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COALESCE(SUM(amount), 0)
+                    SELECT COALESCE(SUM(amount), 0) AS total
                     FROM expenses
                     WHERE user_id = %s
                       AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
                     """,
                     (user.id,),
                 )
-                total = cur.fetchone()[0]
+                row = cur.fetchone()
+                total = row["total"]
     except Exception:
         logger.exception("Failed to read month expenses")
         await update.message.reply_text("Не смог прочитать данные из базы.")
         return
 
-    await update.message.reply_text(f"За этот месяц: {float(total):.2f}")
+    await update.message.reply_text(f"За этот месяц: {Decimal(total):.2f}")
 
 
 async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
+        return
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return
 
     try:
@@ -272,17 +384,21 @@ async def last_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = ["Последние расходы:"]
-    for category, amount, description, created_at in rows:
-        dt = created_at.strftime("%d.%m %H:%M")
-        desc = description or "Без описания"
-        lines.append(f"{dt} | {category} | {float(amount):.2f} | {desc}")
+    for row in rows:
+        dt = row["created_at"].strftime("%d.%m %H:%M")
+        desc = row["description"] or "Без описания"
+        lines.append(f"{dt} | {row['category']} | {Decimal(row['amount']):.2f} | {desc}")
 
     await update.message.reply_text("\n".join(lines))
 
 
 async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.message or not is_allowed(user.id):
+    if not user or not update.message:
+        return
+
+    if not is_allowed(user.id):
+        await deny_access(update)
         return
 
     try:
@@ -295,7 +411,7 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE user_id = %s
                       AND date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE)
                     GROUP BY category
-                    ORDER BY total DESC
+                    ORDER BY total DESC, category ASC
                     """,
                     (user.id,),
                 )
@@ -310,26 +426,20 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = ["Категории за месяц:"]
-    for category, total in rows:
-        lines.append(f"{category}: {float(total):.2f}")
+    for row in rows:
+        lines.append(f"{row['category']}: {Decimal(row['total']):.2f}")
 
     await update.message.reply_text("\n".join(lines))
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_expense_draft(context)
     if update.message:
         await update.message.reply_text("Ок, отменил.", reply_markup=ReplyKeyboardRemove())
-    context.user_data.pop("new_expense_category", None)
-    context.user_data.pop("new_expense_amount", None)
     return ConversationHandler.END
 
 
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN не задан")
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL не задан")
-
     init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -353,7 +463,7 @@ def main():
     app.add_handler(conv_handler)
 
     logger.info("Bot started")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
