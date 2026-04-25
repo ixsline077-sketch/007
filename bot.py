@@ -94,8 +94,6 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS expenses (
                     id BIGSERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
-                    chat_id BIGINT NOT NULL,
-                    source_message_id BIGINT,
                     category TEXT NOT NULL,
                     amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
                     description TEXT,
@@ -103,6 +101,20 @@ def init_db():
                 )
                 """
             )
+
+            cur.execute(
+                """
+                ALTER TABLE expenses
+                ADD COLUMN IF NOT EXISTS chat_id BIGINT
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE expenses
+                ADD COLUMN IF NOT EXISTS source_message_id BIGINT
+                """
+            )
+
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_expenses_user_created_at
@@ -328,6 +340,7 @@ async def handle_edited_amount(update: Update, context: ContextTypes.DEFAULT_TYP
                     WHERE user_id = %s
                       AND chat_id = %s
                       AND source_message_id = %s
+                      AND source_message_id IS NOT NULL
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
@@ -339,6 +352,9 @@ async def handle_edited_amount(update: Update, context: ContextTypes.DEFAULT_TYP
                     return
 
                 old_amount = row["amount"]
+
+                if Decimal(old_amount) == new_amount:
+                    return
 
                 cur.execute(
                     """
@@ -530,10 +546,15 @@ def main():
     app.add_handler(CommandHandler("categories", categories))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(conv_handler)
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_amount))
+    app.add_handler(
+        MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_amount)
+    )
 
     logger.info("Bot started")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
