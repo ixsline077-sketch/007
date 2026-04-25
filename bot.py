@@ -180,8 +180,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/month — сумма за месяц\n"
         "/last — последние 10 записей\n"
         "/categories — суммы по категориям за месяц\n"
-        "/delete — удалить последний расход\n"
-        "/deleted 123 — удалить расход по id\n"
+        "/delete 123 — удалить расход по id\n"
         "/cancel — отмена\n\n"
         "Если ошибся в сумме, просто отредактируй сообщение с суммой."
     )
@@ -531,40 +530,24 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deny_access(update)
         return
 
-    expense_id = None
+    if len(context.args) != 1 or not context.args[0].strip().isdigit():
+        await update.message.reply_text("Используй: /delete 123")
+        return
 
-    if context.args:
-        arg = context.args[0].strip()
-        if not arg.isdigit():
-            await update.message.reply_text("Используй: /delete или /delete 123")
-            return
-        expense_id = int(arg)
+    expense_id = int(context.args[0].strip())
 
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                if expense_id is None:
-                    cur.execute(
-                        """
-                        SELECT id, category, amount, description, created_at
-                        FROM expenses
-                        WHERE user_id = %s
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                        """,
-                        (user.id,),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT id, category, amount, description, created_at
-                        FROM expenses
-                        WHERE user_id = %s AND id = %s
-                        LIMIT 1
-                        """,
-                        (user.id, expense_id),
-                    )
-
+                cur.execute(
+                    """
+                    SELECT id, category, amount, description, created_at
+                    FROM expenses
+                    WHERE user_id = %s AND id = %s
+                    LIMIT 1
+                    """,
+                    (user.id, expense_id),
+                )
                 row = cur.fetchone()
 
                 if not row:
@@ -576,7 +559,7 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     DELETE FROM expenses
                     WHERE user_id = %s AND id = %s
                     """,
-                    (user.id, row["id"]),
+                    (user.id, expense_id),
                 )
             conn.commit()
     except Exception:
